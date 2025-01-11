@@ -1,0 +1,165 @@
+import logging
+from rdkit import Chem
+from rdkit.Chem import AllChem, Draw
+import os
+import csv
+import subprocess
+import pubchempy as pcp
+from tqdm import tqdm  # 进度条库
+
+# 配置日志
+logging.basicConfig(filename='chlorination.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def log(message):
+    logging.info(message)
+    print(message)  # 同时输出到控制台
+
+
+def generate_chlorinated_products(smiles):
+    log("Generating chlorinated products...")
+    # 将SMILES转换为RDKit分子对象
+    mol = Chem.MolFromSmiles(smiles)
+    log(f"Converted SMILES '{smiles}' to RDKit molecule object.")
+
+    # 更新属性缓存
+    mol.UpdatePropertyCache(strict=False)
+    log("Updated property cache.")
+
+    # 添加显式的氢原子
+    mol_with_h = Chem.AddHs(mol)
+    log("Added explicit hydrogens to the molecule.")
+
+    # 找到所有的氢原子
+    h_indices = [atom.GetIdx() for atom in mol_with_h.GetAtoms() if atom.GetSymbol() == 'H']
+    log(f"Found {len(h_indices)} hydrogen atoms at indices: {h_indices}")
+
+    # 创建一个字典，用于存储所有的氯化产物
+    chlorinated_products = {}
+
+    # 遍历所有可能的氢被氯取代的情况
+    total_combinations = 2 ** len(h_indices)  # 每个氢原子有两种状态：被氯取代或不被取代
+    log(f"Total combinations to process: {total_combinations}")
+
+    for i in tqdm(range(total_combinations), desc="Processing combinations"):
+        if i % 1000 == 0:
+            log(f"Processing combination {i}/{total_combinations}")
+
+        # 将整数i转换为二进制字符串，表示哪些氢原子被氯取代
+        binary_representation = bin(i)[2:].zfill(len(h_indices))
+
+        new_mol = Chem.RWMol(mol_with_h)  # 创建一个新的可编辑分子对象
+        modified = False
+
+        for j, bit in enumerate(binary_representation):
+            if bit == '1':  # 如果位为1，则替换氢原子为氯
+                modified = True
+                h_atom_idx = h_indices[j]
+                new_mol.ReplaceAtom(h_atom_idx, Chem.Atom(17))  # 17是氯的原子序数
+                log(f"Replaced hydrogen at index {h_atom_idx} with Cl")
+
+        if modified:
+            # 生成标准化的SMILES
+            product_smiles = Chem.MolToSmiles(Chem.RemoveHs(new_mol), isomericSmiles=False, canonical=True)
+            log(f"Generated SMILES: {product_smiles}")
+
+            # 只有当产物还没有出现过时才添加
+            if product_smiles not in chlorinated_products:
+                chlorinated_products[product_smiles] = new_mol
+                log(f"Added new product with SMILES: {product_smiles}")
+
+    log(f"Generated {len(chlorinated_products)} unique chlorinated products.")
+    # 返回产物列表
+    return list(chlorinated_products.items())
+
+
+def save_molecule_images(products, output_dir):
+    log("Saving molecule images and information...")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        log(f"Created directory: {output_dir}")
+
+    with open(os.path.join(output_dir, "compound_info.txt"), "w") as info_file:
+        for i, (smiles, mol) in tqdm(enumerate(products), total=len(products), desc="Saving images"):
+            image_path = os.path.join(output_dir, f"Cl_product_{i}.png")
+            Draw.MolToFile(mol, image_path)
+            info_file.write(f"Product {i}: {smiles}\n")
+            log(f"Saved {image_path} - SMILES: {smiles}")
+
+
+def save_to_csv(products, csv_file):
+    log("Saving compound information to CSV file...")
+    with open(csv_file, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Index', 'SMILES'])
+        for i, (smiles, _) in tqdm(enumerate(products), total=len(products), desc="Saving CSV"):
+            writer.writerow([i, smiles])
+            log(f"Saved row {i} to CSV: {smiles}")
+
+
+def prepare_pdbqt_files(products, output_dir):
+    log("Preparing PDB and PDBQT files...")
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        log(f"Created directory: {output_dir}")
+
+    for i, (smiles, mol) in tqdm(enumerate(products), total=len(products), desc="Preparing PDBQT files"):
+        # 更新属性缓存
+        mol.UpdatePropertyCache(strict=False)
+        log(f"Updated property cache for product {i} with SMILES: {smiles}")
+
+        # 加氢
+        mol_with_h = Chem.AddHs(mol)
+        log(f"Added explicit hydrogens to product {i} with SMILES: {smiles}")
+
+        # 生成3D结构
+        AllChem.EmbedMolecule(mol_with_h)
+        AllChem.MMFFOptimizeMolecule(mol_with_h)
+        log(f"Generated 3D structure for product {i} with SMILES: {smiles}")
+
+        # 保存为PDB文件
+        pdb_file = os.path.join(output_dir, f"Cl_product_{i}.pdb")
+        Chem.MolToPDBFile(mol_with_h, pdb_file)
+        log(f"Generated PDB file: {pdb_file}")
+
+        # 使用MGLTools生成PDBQT文件
+        pdbqt_file = os.path.join(output_dir, f"Cl_product_{i}.pdbqt")
+        command = f"prepare_ligand4.py -l {pdb_file} -o {pdbqt_file}"
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            log(f"Generated PDBQT file: {pdbqt_file}")
+        else:
+            log(f"Failed to generate PDBQT file: {pdbqt_file}")
+            log(f"Error: {result.stderr}")
+
+
+def get_cas_cid(smiles):
+    log(f"Querying PubChem for SMILES: {smiles}")
+    try:
+        compound = pcp.get_compounds(smiles, 'smiles')[0]
+        cas_number = compound.casn if hasattr(compound, 'casn') else None
+        cid = compound.cid
+        log(f"Found CAS: {cas_number}, CID: {cid}")
+        return cas_number, cid
+    except IndexError:
+        log(f"No PubChem entry found for SMILES: {smiles}")
+        return None, None
+
+
+# 给定的分子式
+smiles = "C1CC2=CC=CC3=C2C1=CC=C3"
+
+# 生成所有氯取代产物
+chlorinated_products = generate_chlorinated_products(smiles)
+
+# 保存所有产物的图片和信息
+output_dir = "Cl_ACENAPHTHENE_products_images"
+save_molecule_images(chlorinated_products, output_dir)
+
+# 保存化合物信息到CSV文件
+csv_file = "Cl_ACENAPHTHENE_products_info.csv"
+save_to_csv(chlorinated_products, csv_file)
+
+# 准备PDB和PDBQT文件
+pdbqt_output_dir = "Cl_ACENAPHTHENE_products_pdbqt"
+prepare_pdbqt_files(chlorinated_products, pdbqt_output_dir)
