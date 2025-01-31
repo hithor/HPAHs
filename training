@@ -1,0 +1,209 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, AdaBoostRegressor, ExtraTreesRegressor
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from scipy.stats import zscore
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+import joblib
+
+
+# 创建以模型名称命名的目录（如果不存在），用于存储该模型相关文件
+def create_model_dir(model_name):
+    model_dir = f'/Users/PycharmProjects/untitled/20241231寻找其他化合物EC50/{model_name}'
+    os.makedirs(model_dir, exist_ok=True)
+    return model_dir
+
+
+# 修改后的评估函数，将相关文件保存到对应模型目录下
+def evaluate_and_save_results(model_name, clf, param_grid, X_train, y_train, X_test, y_test):
+    model_dir = create_model_dir(model_name)
+    grid_search = GridSearchCV(estimator=clf, param_grid=param_grid, cv=5, n_jobs=-1, verbose=2,
+                               scoring='neg_mean_squared_error')
+    grid_search.fit(X_train, y_train)
+    best_clf = grid_search.best_estimator_
+
+    # 训练集评估
+    y_train_pred = best_clf.predict(X_train)
+    train_mse = mean_squared_error(y_train, y_train_pred)
+    train_rmse = np.sqrt(train_mse)
+    train_r2 = r2_score(y_train, y_train_pred)
+    train_mae = mean_absolute_error(y_train, y_train_pred)
+
+    # 测试集评估
+    y_test_pred = best_clf.predict(X_test)
+    test_mse = mean_squared_error(y_test, y_test_pred)
+    test_rmse = np.sqrt(test_mse)
+    test_r2 = r2_score(y_test, y_test_pred)
+    test_mae = mean_absolute_error(y_test, y_test_pred)
+
+    # 保存最佳模型到对应模型目录
+    model_filename = f'{model_dir}/{model_name}_best_model.joblib'
+    joblib.dump(best_clf, model_filename)
+    print(f"Best {model_name} model saved to {model_filename}")
+
+    # 创建报告DataFrame
+    report_df = pd.DataFrame({
+        'Model': [model_name],
+        'Train RMSE': [train_rmse],
+        'Train R2 Score': [train_r2],
+        'Train MAE': [train_mae],
+        'Test RMSE': [test_rmse],
+        'Test R2 Score': [test_r2],
+        'Test MAE': [test_mae]
+    })
+
+    # 保存实际值与预测值对比图到对应模型目录
+    plot_filename = f'{model_dir}/{model_name}_actual_vs_predicted.png'
+    plt.figure(figsize=(8, 6))
+    plt.scatter(y_test, y_test_pred, alpha=0.5)
+    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--', lw=4)
+    plt.xlabel('Actual')
+    plt.ylabel('Predicted')
+    plt.title(f'{model_name} Actual vs Predicted')
+    plt.savefig(plot_filename, dpi=300)
+    plt.close()
+
+    # 将评估结果保存到对应模型目录下的CSV文件
+    result_csv_filename = f'{model_dir}/{model_name}_evaluation_results.csv'
+    report_df.to_csv(result_csv_filename, index=False)
+    print(f"Evaluation results for {model_name} saved to {result_csv_filename}")
+
+    return report_df
+
+
+# 函数：加载模型并进行测试，从对应模型目录加载模型
+def load_and_test_model(model_name, X_test, y_test):
+    model_dir = create_model_dir(model_name)
+    model_filename = f'{model_dir}/{model_name}_best_model.joblib'
+    loaded_model = joblib.load(model_filename)
+    print(f"Loaded {model_name} model from {model_filename}")
+
+    y_pred = loaded_model.predict(X_test)
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+    print(f"{model_name} MSE: {mse:.4f}, RMSE: {rmse:.4f}, R2 Score: {r2:.4f}, MAE: {mae:.4f}")
+
+    # 保存实际值与预测值对比图到对应模型目录
+    plot_filename = f'{model_dir}/{model_name}_loaded_actual_vs_predicted.png'
+    plt.figure(figsize=(8, 6))
+    plt.scatter(y_test, y_pred, alpha=0.5)
+    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--', lw=4)
+    plt.xlabel('Actual')
+    plt.ylabel('Predicted')
+    plt.title(f'{model_name} Actual vs Predicted')
+    plt.savefig(plot_filename, dpi=300)
+    plt.close()
+
+
+# 函数：预测新数据（使用中位数填充缺失值并筛选特征变量版本，且每个模型单独保存结果到对应目录）
+def predict_new_data_with_median_fill_and_feature_selection(model_name, new_data_path, output_path_prefix):
+    model_dir = create_model_dir(model_name)
+    new_df = pd.read_csv(new_data_path)
+    X_new = new_df.copy()
+
+    # 只选取训练模型时用到的特征变量
+    common_features = X.columns.intersection(X_new.columns)
+    if len(common_features)!= len(X.columns):
+        print("Warning: New data does not contain all features used in training.")
+    X_new = X_new[common_features]
+
+    # 使用中位数填充缺失值
+    median_values = X_new.median()
+    X_new.fillna(median_values, inplace=True)
+
+    # 特征标准化（假设训练时已拟合好scaler，这里直接用同样的方式转换）
+    scaler = StandardScaler()
+    X_new_scaled = scaler.fit_transform(X_new)
+
+    model_filename = f'{model_dir}/{model_name}_best_model.joblib'
+    loaded_model = joblib.load(model_filename)
+    print(f"Loaded {model_name} model from {model_filename}")
+
+    y_pred_new = loaded_model.predict(X_new_scaled)
+
+    # 将预测结果添加到新数据副本中
+    new_result_df = new_df.copy()
+    new_result_df.insert(0, 'Prediction', y_pred_new)
+
+    # 构建每个模型单独的输出路径，保存到对应模型目录下
+    output_path = f"{model_dir}/{output_path_prefix}_{model_name}_prediction.csv"
+    new_result_df.to_csv(output_path, index=False)
+    print(f"Prediction results for {model_name} saved to {output_path}")
+
+
+# 加载数据
+data_path = '/Users/zhangwanglong/PycharmProjects/untitled/20241231寻找其他化合物EC50/初步测试/HAHs-EC50-2-padelpy-5-0.95-log.csv.csv'
+df = pd.read_csv(data_path)
+
+# 分离特征和目标变量
+X = df.iloc[:, 1:]  # 分子描述符作为特征
+y = df.iloc[:, 0]  # 第一列作为目标变量
+
+
+# 分割数据集为训练集和测试集
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 标准化特征值
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# 定义多个回归器及其对应的超参数网格
+regressors = {
+    'XGBoost': (XGBRegressor(use_label_encoder=False, eval_metric='rmse', random_state=42),
+                {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.1], 'max_depth': [3, 5]}),
+    'RandomForest': (RandomForestRegressor(random_state=42),
+                     {'n_estimators': [50, 100], 'max_depth': [None, 10]}),
+    'GradientBoosting': (GradientBoostingRegressor(random_state=42),
+                         {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.1], 'max_depth': [3, 5]}),
+    'AdaBoost': (AdaBoostRegressor(random_state=42),
+                 {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.1]}),
+    'KNN': (KNeighborsRegressor(),
+            {'n_neighbors': [3, 5], 'weights': ['uniform', 'distance']}),
+    'LinearRegression': (LinearRegression(),
+                         {}),
+    'Ridge': (Ridge(),
+              {'alpha': [0.1, 1, 10]}),
+    'Lasso': (Lasso(),
+              {'alpha': [0.1, 1, 10]}),
+    'LightGBM': (LGBMRegressor(random_state=42),
+                 {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.1], 'max_depth': [-1, 5]}),
+    'ExtraTrees': (ExtraTreesRegressor(random_state=42),
+                   {'n_estimators': [50, 100], 'max_depth': [None, 10]})
+}
+
+# 初始化存储所有模型结果的DataFrame
+results = []
+
+# 遍历每个回归器并评估
+for model_name, (clf, param_grid) in regressors.items():
+    print(f"Training and evaluating {model_name}...")
+    result = evaluate_and_save_results(model_name, clf, param_grid, X_train, y_train, X_test, y_test)
+    results.append(result)
+
+# 合并所有模型的结果并保存到CSV文件（这里暂时注释掉，因为每个模型结果已单独保存）
+# final_results = pd.concat(results, ignore_index=True)
+# final_results.to_csv('/Users/PycharmProjects/untitled/20241231寻找其他化合物EC50/初步测试/model_performance_with_details3.csv', index=False)
+# print("All models have been evaluated and the results are saved with detailed performance metrics.")
+
+# 对新数据进行预测（使用中位数填充缺失值并筛选特征变量，每个模型单独保存结果），这里替换为你实际的新数据路径和输出路径前缀
+new_data_path = '/Users/PycharmProjects/untitled/化合物生成及PBDQT-Cl/Cl_products_info_descriptors_副本.csv'
+output_path_prefix = 'actual_sample_data'
+for model_name in regressors.keys():
+    print(f"Predicting with {model_name}...")
+    predict_new_data_with_median_fill_and_feature_selection(model_name, new_data_path, output_path_prefix)
+
+# 测试所有保存的模型（可根据需求选择是否执行这部分，因为前面已经评估过了）
+for model_name in regressors.keys():
+    print(f"Testing loaded {model_name}...")
+    load_and_test_model(model_name, X_test, y_test)
