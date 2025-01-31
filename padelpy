@@ -1,0 +1,75 @@
+import pandas as pd
+from padelpy import from_smiles
+from tqdm import tqdm
+import logging
+import glob
+import os
+
+# 配置日志记录
+logging.basicConfig(level=logging.INFO)
+
+# 定义文件夹路径和输出文件名
+input_folder = '/Users/PycharmProjects/untitled/化合物生成及PBDQT-Cl'
+output_file = os.path.join(input_folder, 'Cl_products_info_descriptors.csv')
+# 使用glob模块递归查找所有符合模式的CSV文件，并打印查找模式和结果
+pattern = os.path.join(input_folder, '**', '*_info.csv')  # 使用 ** 表示递归查找
+csv_files = glob.glob(pattern, recursive=True)  # 设置 recursive=True
+
+# 创建一个空列表用于存储所有处理过的DataFrame
+processed_dfs = []
+
+# 打印文件夹内容以进行调试
+logging.info(f"Listing all files in {input_folder} and its subdirectories:")
+for root, dirs, files in os.walk(input_folder):
+    for file in files:
+        logging.info(os.path.join(root, file))
+
+if not csv_files:
+    logging.warning(f"No files found matching the pattern {pattern}")
+else:
+    logging.info(f"Found {len(csv_files)} files matching the pattern {pattern}")
+    # 遍历所有CSV文件
+    for file_path in tqdm(csv_files, desc="Processing Files"):
+        try:
+            df = pd.read_csv(file_path, encoding='utf-8')
+
+            # 假设SMILES列名为 'SMILES'，如果不是，请替换为实际的列名
+            smiles_column = 'SMILES'
+
+            # 创建一个空DataFrame用于存储每行的描述符
+            descriptors_df = pd.DataFrame()
+
+            # 使用字典来缓存已计算的描述符，避免重复计算
+            descriptor_cache = {}
+
+            # 获取所有SMILES并去重
+            unique_smiles = df[smiles_column].unique()
+
+            # 计算描述符并更新缓存
+            for smiles in tqdm(unique_smiles, desc=f"Calculating Descriptors for {file_path}"):
+                if smiles not in descriptor_cache:
+                    try:
+                        descriptor_cache[smiles] = from_smiles(smiles)
+                    except Exception as e:
+                        logging.error(f"Error processing SMILES {smiles}: {e}")
+                        descriptor_cache[smiles] = None  # 标记错误
+
+            # 将描述符添加到原始DataFrame中
+            for key in list(descriptor_cache.values())[0].keys():
+                df[key] = df[smiles_column].map(lambda x: descriptor_cache[x][key] if descriptor_cache[x] else None)
+
+            # 添加到处理过的DataFrame列表中
+            processed_dfs.append(df)
+
+        except Exception as e:
+            logging.error(f"Error processing file {file_path}: {e}")
+
+    # 如果有处理过的DataFrame，则合并它们
+    if processed_dfs:
+        combined_df = pd.concat(processed_dfs, ignore_index=True)
+
+        # 将结果保存为新的CSV文件
+        combined_df.to_csv(output_file, index=False, encoding='utf-8')
+        logging.info(f"Processed data saved to {output_file}")
+    else:
+        logging.warning("No processed data available to save.")
